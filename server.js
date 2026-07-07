@@ -24,8 +24,8 @@ app.use(express.json({ limit: '2mb' }));
 
 const TOKEN = process.env.RENDER_TOKEN || '';
 const PORT = process.env.PORT || 3000;
-const NAV_TIMEOUT = parseInt(process.env.NAV_TIMEOUT_MS || '20000', 10);
-const SETTLE_MS = parseInt(process.env.SETTLE_MS || '1500', 10);
+const NAV_TIMEOUT = parseInt(process.env.NAV_TIMEOUT_MS || '25000', 10);
+const SETTLE_MS = parseInt(process.env.SETTLE_MS || '2500', 10);
 
 // On garde une instance de navigateur chaude entre les requêtes (perf).
 let browserPromise = null;
@@ -80,10 +80,25 @@ app.post('/render', async (req, res) => {
       } catch (e) { /* ignore */ }
     });
 
-    // On charge la page et on ATTEND que le réseau se calme, mais on NE CLIQUE PAS
-    // sur le bandeau : on veut précisément ce qui se déclenche sans consentement.
-    await page.goto(url, { waitUntil: 'networkidle', timeout: NAV_TIMEOUT }).catch(() => {});
-    // Marge pour les scripts asynchrones (tags différés, GTM...).
+    // Adaptatif : on ne TÉLÉCHARGE pas les ressources lourdes inutiles à l'analyse de
+    // conformité (images, vidéos, polices). Leur URL reste journalisée pour la détection
+    // de traceurs (page.on('request') ci-dessus se déclenche avant l'abort), mais on
+    // économise énormément de RAM et de temps → le rendu tient sur 512 Mo et encaisse
+    // même les sites très lourds (e-commerce, médias US).
+    await page.route('**/*', (route) => {
+      const t = route.request().resourceType();
+      if (t === 'image' || t === 'media' || t === 'font') {
+        return route.abort().catch(() => {});
+      }
+      return route.continue().catch(() => {});
+    });
+
+    // On charge la page sans cliquer le bandeau (on veut l'état AVANT consentement).
+    // waitUntil 'load' est BORNÉ, contrairement à 'networkidle' que les sites bardés de
+    // pubs n'atteignent jamais → plus de timeouts sur les gros sites. On renvoie toujours
+    // ce qui a été chargé, même si le délai est dépassé.
+    await page.goto(url, { waitUntil: 'load', timeout: NAV_TIMEOUT }).catch(() => {});
+    // Marge pour les scripts asynchrones (tags différés, GTM...) qui posent cookies/traceurs.
     await page.waitForTimeout(SETTLE_MS);
 
     const html = await page.content().catch(() => '');
